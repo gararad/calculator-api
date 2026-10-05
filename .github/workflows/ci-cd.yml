@@ -13,7 +13,7 @@ jobs:
     name: Тесты и проверка сборки
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -42,7 +42,7 @@ jobs:
       contents: write   # для создания git-тега и релиза
       packages: write   # для публикации в GHCR
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Версия вида 1.0.<номер запуска>: растёт автоматически при каждом пуше
       - name: Вычисление версии
