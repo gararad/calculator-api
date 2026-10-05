@@ -1,0 +1,97 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    name: Тесты и проверка сборки
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установка зависимостей
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: Проверка, что приложение импортируется
+        run: python -c "from app.main import app; print('OK:', app.title)"
+
+      - name: Запуск тестов (если есть папка tests)
+        run: |
+          if [ -d tests ]; then pytest -v; else echo "Папки tests нет, пропускаем"; fi
+
+  # --- Сюда на 3 этапе добавим job'ы: semgrep, trivy (fs и image), gitleaks ---
+
+  build-and-publish:
+    name: Сборка и публикация образа
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # для создания git-тега и релиза
+      packages: write   # для публикации в GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      # Версия вида 1.0.<номер запуска>: растёт автоматически при каждом пуше
+      - name: Вычисление версии
+        id: ver
+        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Сборка образа
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: calculator-api:test
+
+      - name: Smoke-test контейнера
+        run: |
+          docker run -d --name calc -p 8000:8000 calculator-api:test
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:8000/health > /dev/null && echo "API поднялся" && exit 0
+            sleep 2
+          done
+          docker logs calc
+          exit 1
+
+      # Дальше только для main
+      - name: Вход в GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Публикация образа
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Git-тег и релиз
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --generate-notes
