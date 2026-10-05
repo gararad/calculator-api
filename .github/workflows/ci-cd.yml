@@ -30,7 +30,7 @@ jobs:
 
       - name: Запуск тестов (если есть папка tests)
         run: |
-          if [ -d tests ]; then python -m pytest; else echo "Папки tests нет, пропускаем"; fi
+          if [ -d tests ]; then python -m pytest -v; else echo "Папки tests нет, пропускаем"; fi
 
   # --- Сюда на 3 этапе добавим job'ы: semgrep, trivy (fs и image), gitleaks ---
 
