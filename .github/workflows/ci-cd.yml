@@ -9,6 +9,7 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
+  # Тесты
   test:
     name: Тесты и проверка сборки
     runs-on: ubuntu-latest
@@ -32,11 +33,121 @@ jobs:
         run: |
           if [ -d tests ]; then python -m pytest -v; else echo "Папки tests нет, пропускаем"; fi
 
-  # --- Сюда на 3 этапе добавим job'ы: semgrep, trivy (fs и image), gitleaks ---
+  #Инструменты безопасности
 
+  # SAST - Semgrep
+  semgrep:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # требуется для загрузки SARIF
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep:latest \
+            semgrep scan --config auto --sarif --output semgrep.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  #  Секреты - Gitleaks
+  gitleaks:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks нужен полный git history
+
+      - name: Run Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source=/repo --report-format=sarif \
+            --report-path=/repo/gitleaks.sarif --no-banner
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  # SCA - Trivy по файловой системе
+  trivy-fs:
+    name: Trivy (filesystem / dependencies)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy fs scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"        # не валить пайплайн, только отчёт
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # Trivy по собранному образу
+  trivy-image:
+    name: Trivy (container image)
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image for scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: calculator-api:scan
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: calculator-api:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"        # CRITICAL/HIGH валят пайплайн, блокируя публикацию
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  # Сборка и публикация (ожидает безопасности)
   build-and-publish:
     name: Сборка и публикация образа
-    needs: test
+    needs: [ test, semgrep, gitleaks, trivy-fs, trivy-image ]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # для создания git-тега и релиза
@@ -44,7 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Версия вида 1.0.<номер запуска>: растёт автоматически при каждом пуше
+      # Версия растёт автоматически при каждом пуше
       - name: Вычисление версии
         id: ver
         run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
